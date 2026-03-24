@@ -6,6 +6,7 @@ def mine_block(
     previous: Block,
     transactions: list[Transaction],
     miner_address: str,
+    fees: int = 0,
 ) -> Block:
     """
     Mine a new block on top of `previous`.
@@ -18,7 +19,7 @@ def mine_block(
     """
     index = previous.index + 1
     timestamp = int(time.time())
-    coinbase = make_coinbase(miner_address, index)
+    coinbase = make_coinbase(miner_address, index, fees)
     all_txs = [coinbase] + list(transactions)
 
     # Build the initial block candidate (merkle_root computed once here)
