@@ -4,6 +4,7 @@ from gigachain import (
     new_genesis, make_coinbase, compute_block_hash, meets_target,
     add_block, validate_chain, get_utxo_set, last_block,
     mine_block, BLOCK_REWARD, DIFFICULTY, COINBASE_TX_ID,
+    Wallet, sign_transaction,
 )
 
 
@@ -144,21 +145,25 @@ def test_utxo_grows_with_each_mined_block():
 
 
 def test_spend_mined_coinbase():
-    chain = fresh_chain()
-    block1 = mine_block(chain[-1], [], "alice")
+    alice = Wallet.generate()
+    chain = [new_genesis(alice.address)]
+    block1 = mine_block(chain[-1], [], alice.address)
     add_block(chain, block1)
 
-    # Spend alice's block1 coinbase
+    # Spend alice's block1 coinbase (signed by alice)
     alice_coinbase = block1.transactions[0]
-    spend_tx = Transaction(
-        inputs=[Input(tx_id=alice_coinbase.tx_id, output_index=0)],
-        outputs=[Output(recipient="bob", amount=BLOCK_REWARD)],
-    )
+    inp = Input(tx_id=alice_coinbase.tx_id, output_index=0)
+    out = Output(recipient="bob", amount=BLOCK_REWARD)
+    inp.signature = sign_transaction(alice, [inp], [out])
+    inp.public_key = alice.public_key_hex()
+    spend_tx = Transaction(inputs=[inp], outputs=[out])
+
     block2 = mine_block(chain[-1], [spend_tx], "miner")
     add_block(chain, block2)
 
     utxos = get_utxo_set(chain)
     recipients = {o.recipient for o in utxos.values()}
-    # genesis coinbase (alice) unspent, block1 coinbase spent, block2 coinbase + bob unspent
+    # genesis coinbase + block1 coinbase both spent by now? No:
+    # genesis coinbase (alice.address) unspent, block1 coinbase spent, block2 coinbase + bob unspent
     assert "bob" in recipients
     assert "miner" in recipients
