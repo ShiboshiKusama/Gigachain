@@ -5,6 +5,7 @@ from gigachain import (
     new_genesis, make_coinbase, compute_block_hash, compute_merkle_root,
     add_block, validate_chain, get_block, last_block, get_utxo_set,
     mine_block, BLOCK_REWARD, COINBASE_TX_ID,
+    Wallet, sign_transaction,
 )
 
 
@@ -14,6 +15,16 @@ from gigachain import (
 
 def fresh_chain():
     return [new_genesis("alice")]
+
+
+def signed_spend(wallet, utxo_tx_id, utxo_out_idx, recipient, amount):
+    """Build a signed transaction spending one UTXO."""
+    inp = Input(tx_id=utxo_tx_id, output_index=utxo_out_idx)
+    out = Output(recipient=recipient, amount=amount)
+    sig = sign_transaction(wallet, [inp], [out])
+    inp.signature = sig
+    inp.public_key = wallet.public_key_hex()
+    return Transaction(inputs=[inp], outputs=[out])
 
 
 # ---------------------------------------------------------------------------
@@ -154,61 +165,50 @@ def test_utxo_set_after_genesis():
 
 
 def test_spend_utxo():
-    chain = fresh_chain()
+    alice = Wallet.generate()
+    chain = [new_genesis(alice.address)]
     genesis_coinbase = chain[0].transactions[0]
 
-    spend_tx = Transaction(
-        inputs=[Input(tx_id=genesis_coinbase.tx_id, output_index=0)],
-        outputs=[Output(recipient="bob", amount=BLOCK_REWARD)],
-    )
-    block2 = mine_block(chain[-1], [spend_tx], "alice")
+    spend_tx = signed_spend(alice, genesis_coinbase.tx_id, 0, "bob", BLOCK_REWARD)
+    block2 = mine_block(chain[-1], [spend_tx], alice.address)
     add_block(chain, block2)
 
     utxos = get_utxo_set(chain)
     # genesis coinbase spent; block2 coinbase + bob output unspent
     assert len(utxos) == 2
     recipients = {o.recipient for o in utxos.values()}
-    assert "alice" in recipients
+    assert alice.address in recipients
     assert "bob" in recipients
 
 
 def test_double_spend_rejected():
-    chain = fresh_chain()
+    alice = Wallet.generate()
+    chain = [new_genesis(alice.address)]
     genesis_coinbase = chain[0].transactions[0]
 
-    spend1 = Transaction(
-        inputs=[Input(tx_id=genesis_coinbase.tx_id, output_index=0)],
-        outputs=[Output(recipient="bob", amount=BLOCK_REWARD)],
-    )
-    spend2 = Transaction(
-        inputs=[Input(tx_id=genesis_coinbase.tx_id, output_index=0)],
-        outputs=[Output(recipient="carol", amount=BLOCK_REWARD)],
-    )
-    block = mine_block(chain[-1], [spend1, spend2], "alice")
+    spend1 = signed_spend(alice, genesis_coinbase.tx_id, 0, "bob", BLOCK_REWARD)
+    spend2 = signed_spend(alice, genesis_coinbase.tx_id, 0, "carol", BLOCK_REWARD)
+    block = mine_block(chain[-1], [spend1, spend2], alice.address)
     with pytest.raises(ValueError, match="double-spend"):
         add_block(chain, block)
 
 
 def test_spend_nonexistent_utxo_rejected():
-    chain = fresh_chain()
-    bad_tx = Transaction(
-        inputs=[Input(tx_id="a" * 64, output_index=0)],
-        outputs=[Output(recipient="bob", amount=10)],
-    )
-    block = mine_block(chain[-1], [bad_tx], "alice")
+    alice = Wallet.generate()
+    chain = [new_genesis(alice.address)]
+    bad_tx = signed_spend(alice, "a" * 64, 0, "bob", 10)
+    block = mine_block(chain[-1], [bad_tx], alice.address)
     with pytest.raises(ValueError, match="not in UTXO set"):
         add_block(chain, block)
 
 
 def test_outputs_exceed_inputs_rejected():
-    chain = fresh_chain()
+    alice = Wallet.generate()
+    chain = [new_genesis(alice.address)]
     genesis_coinbase = chain[0].transactions[0]
 
-    overspend = Transaction(
-        inputs=[Input(tx_id=genesis_coinbase.tx_id, output_index=0)],
-        outputs=[Output(recipient="bob", amount=BLOCK_REWARD + 1)],
-    )
-    block = mine_block(chain[-1], [overspend], "alice")
+    overspend = signed_spend(alice, genesis_coinbase.tx_id, 0, "bob", BLOCK_REWARD + 1)
+    block = mine_block(chain[-1], [overspend], alice.address)
     with pytest.raises(ValueError, match="outputs exceed inputs"):
         add_block(chain, block)
 

@@ -25,7 +25,7 @@ COINBASE_TX_ID = "0" * 64  # sentinel: marks a coinbase input
 
 @dataclass
 class Output:
-    recipient: str
+    recipient: str   # address string
     amount: int
 
 
@@ -33,7 +33,10 @@ class Output:
 class Input:
     tx_id: str
     output_index: int
-    # signature: reserved for Phase 3
+    # Phase 3: signature fields.
+    # Both are empty string for coinbase inputs and for unsigned inputs.
+    signature: str = ""       # DER signature hex
+    public_key: str = ""      # compressed public key hex
 
 
 @dataclass
@@ -70,6 +73,9 @@ def _sha256(data: str) -> str:
 
 
 def compute_tx_id(tx: Transaction) -> str:
+    # Signatures are excluded from tx_id: the id commits to what is being spent
+    # and what outputs are created, not to the signatures themselves.
+    # This matches the standard UTXO model.
     inputs_part = ",".join(f"{i.tx_id}:{i.output_index}" for i in tx.inputs)
     outputs_part = ",".join(f"{o.recipient}:{o.amount}" for o in tx.outputs)
     return _sha256(f"{inputs_part}|{outputs_part}")
@@ -102,8 +108,7 @@ def meets_target(hash_hex: str, difficulty: int = DIFFICULTY) -> bool:
 
 def make_coinbase(miner_address: str, block_index: int) -> Transaction:
     """Coinbase transaction. Uses a sentinel input encoding block height
-    to ensure unique tx_id per block (avoids collision when recipient
-    and amount are identical across blocks)."""
+    to ensure unique tx_id per block. Coinbase inputs are unsigned."""
     return Transaction(
         inputs=[Input(tx_id=COINBASE_TX_ID, output_index=block_index)],
         outputs=[Output(recipient=miner_address, amount=BLOCK_REWARD)],

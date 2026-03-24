@@ -3,6 +3,7 @@ from .block import (
     compute_block_hash, compute_merkle_root,
     meets_target, COINBASE_TX_ID, DIFFICULTY,
 )
+from .wallet import verify_transaction_signature, public_key_hex_to_address
 
 
 # ---------------------------------------------------------------------------
@@ -77,20 +78,59 @@ def _validate_block(block: Block, previous: Block | None, utxos_before_block: di
     if coinbase_height != block.index:
         return f"block {block.index}: coinbase input encodes wrong block height ({coinbase_height})"
 
-    # Validate non-coinbase transactions against utxos_before_block
+    # Validate non-coinbase transactions
     spent_in_block: set[tuple[str, int]] = set()
     for tx in block.transactions[1:]:
         if _is_coinbase(tx):
             return f"block {block.index}: only first transaction may be coinbase"
+
         input_total = 0
         for inp in tx.inputs:
             key = (inp.tx_id, inp.output_index)
+
+            # UTXO must exist
             if key not in utxos_before_block:
                 return f"block {block.index} tx {tx.tx_id}: input {key} not in UTXO set"
+
+            # No double-spend within the same block
             if key in spent_in_block:
                 return f"block {block.index} tx {tx.tx_id}: double-spend of {key}"
             spent_in_block.add(key)
-            input_total += utxos_before_block[key].amount
+
+            utxo = utxos_before_block[key]
+
+            # Signature must be present
+            if not inp.signature or not inp.public_key:
+                return (
+                    f"block {block.index} tx {tx.tx_id}: "
+                    f"input {key} is missing signature or public key"
+                )
+
+            # Public key must match the UTXO's recipient address
+            derived = public_key_hex_to_address(inp.public_key)
+            if derived is None:
+                return (
+                    f"block {block.index} tx {tx.tx_id}: "
+                    f"input {key} has invalid public key"
+                )
+
+            if derived != utxo.recipient:
+                return (
+                    f"block {block.index} tx {tx.tx_id}: "
+                    f"input {key} public key does not match UTXO recipient"
+                )
+
+            # Signature must be valid over the transaction content
+            if not verify_transaction_signature(
+                inp.signature, inp.public_key, tx.inputs, tx.outputs
+            ):
+                return (
+                    f"block {block.index} tx {tx.tx_id}: "
+                    f"input {key} has invalid signature"
+                )
+
+            input_total += utxo.amount
+
         output_total = sum(o.amount for o in tx.outputs)
         if input_total < output_total:
             return f"block {block.index} tx {tx.tx_id}: outputs exceed inputs"

@@ -21,3 +21,9 @@ from .chain import (
     get_utxo_set,
 )
 from .miner import mine_block
+from .wallet import (
+    Wallet,
+    sign_transaction,
+    verify_transaction_signature,
+    public_key_hex_to_address,
+)
