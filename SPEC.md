@@ -1,49 +1,153 @@
-# Spec — Phase 1: Local Blockchain
+# Spec — Phase 1: Local Blockchain Prototype
 
-## Block
+Phase 1 is intentionally minimal. The goal is a working in-memory chain with correct hash linkage and basic UTXO-style transactions. No mining, no signatures, no networking.
+
+---
+
+## Block Structure
+
+| Field | Type | Description |
+|---|---|---|
+| `index` | integer | Block height; genesis is 0 |
+| `timestamp` | integer | Unix time in seconds |
+| `previous_hash` | string (64 hex chars) | Hash of the prior block; all zeros for genesis |
+| `nonce` | integer | Reserved for PoW (Phase 2); set to 0 in Phase 1 |
+| `transactions` | list of Transaction | Ordered list of transactions in this block |
+| `hash` | string (64 hex chars) | Computed from block contents; not stored in the input to its own hash |
+
+### Hash Rule
+
+The block hash is computed by the node — it is not trusted from external input.
 
 ```
-{
-  index:        integer
-  timestamp:    unix seconds
-  previous_hash: hex string (64 chars)
-  nonce:        integer
-  transactions: list of Transaction
-  hash:         SHA-256(index + timestamp + previous_hash + nonce + transactions)
-}
+hash = SHA256(serialize(index, timestamp, previous_hash, nonce, transactions))
 ```
 
-## Transaction
+SHA-256 is used here as a **prototype placeholder only**. The final chain hash function will be evaluated for CPU-friendliness before any real network launch.
+
+### Serialization
+
+For Phase 1, serialize block fields as a UTF-8 string in this exact order:
 
 ```
-{
-  sender:    string (address or "coinbase")
-  recipient: string (address)
-  amount:    integer (smallest unit)
-}
+"{index}:{timestamp}:{previous_hash}:{nonce}:{tx_hash_0},{tx_hash_1},...{tx_hash_n}"
 ```
+
+Where each `tx_hash_i` is the hash of that transaction (defined below). This is deterministic and easy to implement. The format can be replaced with a binary encoding later without changing the validation logic.
+
+---
+
+## Transaction Structure
+
+Gigachain uses a **UTXO model**. Transactions consume existing unspent outputs and produce new ones. Phase 1 omits signatures; the structure is designed so signatures slot in cleanly in Phase 3.
+
+### Transaction
+
+| Field | Type | Description |
+|---|---|---|
+| `tx_id` | string (64 hex chars) | Hash of this transaction's contents |
+| `inputs` | list of Input | UTXOs being spent |
+| `outputs` | list of Output | New UTXOs being created |
+
+### Input
+
+| Field | Type | Description |
+|---|---|---|
+| `tx_id` | string | The transaction that created the UTXO being spent |
+| `output_index` | integer | Index into that transaction's output list |
+| `signature` | — | **Omitted in Phase 1**; field reserved for Phase 3 |
+
+### Output
+
+| Field | Type | Description |
+|---|---|---|
+| `recipient` | string | Destination address (placeholder string in Phase 1) |
+| `amount` | integer | Value in the smallest unit (no decimals) |
+
+### Coinbase Transaction
+
+The first transaction in any block is the coinbase. It has no inputs. Its single output pays the block reward to the miner address.
+
+```
+inputs:  []
+outputs: [{ recipient: <miner_address>, amount: BLOCK_REWARD }]
+```
+
+`BLOCK_REWARD` is a constant defined at the chain level (set the value in Phase 2; placeholder for Phase 1).
+
+### Transaction Hash
+
+```
+tx_id = SHA256(serialize(inputs, outputs))
+```
+
+Serialization for inputs: `"{tx_id}:{output_index}"` joined by `,`
+Serialization for outputs: `"{recipient}:{amount}"` joined by `,`
+Combined: `"{serialized_inputs}|{serialized_outputs}"`
+
+---
 
 ## Chain Rules
 
-- Block 0 is the genesis block; `previous_hash` is 64 zeros.
-- Each block's `hash` must match `SHA-256` of its fields.
-- Each block's `previous_hash` must equal the hash of the prior block.
-- A chain is valid only if every block passes both checks.
+1. **Genesis block** — `index` is 0, `previous_hash` is 64 zeros.
+2. **Hash integrity** — each block's stored `hash` must equal the computed hash of its fields.
+3. **Linkage** — each block's `previous_hash` must equal the `hash` of the block at `index - 1`.
+4. **Index sequence** — each block's `index` must equal the previous block's `index + 1`.
+5. **Timestamp** — each block's `timestamp` must be greater than or equal to the previous block's `timestamp`.
+
+A chain is valid only if all rules pass for every block from genesis to tip.
+
+---
+
+## UTXO Rules (Phase 1 — simplified)
+
+1. Every input must reference an output that exists in a prior block.
+2. Every input must reference an output that has not already been spent.
+3. For non-coinbase transactions: `sum(input amounts) >= sum(output amounts)`. Any difference is implicitly the fee (not collected in Phase 1, but the rule must hold).
+4. No transaction may reference an output from a block at the same height or later.
+
+Signatures are **not validated** in Phase 1. The input fields for signature are omitted entirely.
+
+---
+
+## Mempool (Phase 1 — optional)
+
+A mempool can be implemented as a simple list of unconfirmed transactions. Acceptance rules:
+
+- Transaction inputs must reference UTXOs that exist and are unspent in the current chain.
+- Transaction must not double-spend any other mempool transaction.
+- Coinbase transactions are not accepted to the mempool; they are created by the miner.
+
+---
 
 ## Operations
 
-| Operation       | Description                          |
-|-----------------|--------------------------------------|
-| `add_block`     | Append a valid block to the chain    |
-| `validate_chain`| Check all blocks from genesis        |
-| `get_block`     | Retrieve block by index              |
-| `last_block`    | Return the current chain tip         |
+| Operation | Description |
+|---|---|
+| `new_genesis()` | Create and return the genesis block |
+| `add_block(chain, block)` | Validate and append a block; reject if invalid |
+| `validate_chain(chain)` | Check all rules from genesis to tip; return ok or first error |
+| `get_block(chain, index)` | Return block at given index |
+| `last_block(chain)` | Return the current chain tip |
+| `compute_hash(block)` | Compute and return the hash of a block |
+| `get_utxo_set(chain)` | Return all unspent outputs from the current chain |
+
+---
 
 ## Storage
 
-- In-memory list for Phase 1.
-- No persistence required.
+In-memory list. No file persistence in Phase 1.
 
-## Out of Scope
+---
 
-Mining, wallets, networking, signatures — all later phases.
+## Out of Scope for Phase 1
+
+| Feature | Phase |
+|---|---|
+| Proof-of-work mining loop | Phase 2 |
+| Real block rewards | Phase 2 |
+| Key pairs and ECDSA signatures | Phase 3 |
+| UTXO ownership enforcement | Phase 3 |
+| Peer-to-peer networking | Phase 4 |
+| Inscriptions | Phase 5 |
+| Privacy features | Phase 6 |
