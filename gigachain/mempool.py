@@ -33,6 +33,7 @@ class Mempool:
     def __init__(self):
         self._txs: dict[str, Transaction] = {}          # tx_id -> Transaction
         self._claimed: set[tuple[str, int]] = set()     # UTXOs spoken for by mempool txs
+        self._fees: dict[str, int] = {}                 # tx_id -> fee (inputs - outputs)
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -86,6 +87,7 @@ class Mempool:
 
             # Accept
             self._txs[tx.tx_id] = tx
+            self._fees[tx.tx_id] = input_total - output_total
             for inp in tx.inputs:
                 self._claimed.add((inp.tx_id, inp.output_index))
 
@@ -101,6 +103,7 @@ class Mempool:
             for tx_id in tx_ids:
                 tx = self._txs.pop(tx_id, None)
                 if tx:
+                    self._fees.pop(tx_id, None)
                     for inp in tx.inputs:
                         self._claimed.discard((inp.tx_id, inp.output_index))
 
@@ -116,6 +119,7 @@ class Mempool:
             ]
             for tx_id in stale:
                 tx = self._txs.pop(tx_id)
+                self._fees.pop(tx_id, None)
                 for inp in tx.inputs:
                     self._claimed.discard((inp.tx_id, inp.output_index))
 
@@ -124,9 +128,18 @@ class Mempool:
     # ------------------------------------------------------------------
 
     def get_transactions(self) -> list[Transaction]:
-        """Return a snapshot of all pending transactions."""
+        """Return pending transactions sorted by fee descending (highest fee first)."""
         with self._lock:
-            return list(self._txs.values())
+            return sorted(
+                self._txs.values(),
+                key=lambda tx: self._fees.get(tx.tx_id, 0),
+                reverse=True,
+            )
+
+    def get_fee(self, tx_id: str) -> int:
+        """Return the fee for a mempool transaction, or 0 if not found."""
+        with self._lock:
+            return self._fees.get(tx_id, 0)
 
     def contains(self, tx_id: str) -> bool:
         with self._lock:

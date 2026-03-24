@@ -1,7 +1,7 @@
 from .block import (
     Block, Transaction, Input, Output,
     compute_block_hash, compute_merkle_root,
-    meets_target, COINBASE_TX_ID, DIFFICULTY,
+    meets_target, COINBASE_TX_ID, DIFFICULTY, BLOCK_REWARD,
 )
 from .wallet import verify_transaction_signature, public_key_hex_to_address
 from .inscription import MAX_INSCRIPTION_SIZE
@@ -79,8 +79,9 @@ def _validate_block(block: Block, previous: Block | None, utxos_before_block: di
     if coinbase_height != block.index:
         return f"block {block.index}: coinbase input encodes wrong block height ({coinbase_height})"
 
-    # Validate non-coinbase transactions
+    # Validate non-coinbase transactions and accumulate fees
     spent_in_block: set[tuple[str, int]] = set()
+    total_fees = 0
     for tx in block.transactions[1:]:
         # Inscription data: must be valid hex and within size limit
         if tx.data:
@@ -146,6 +147,17 @@ def _validate_block(block: Block, previous: Block | None, utxos_before_block: di
         output_total = sum(o.amount for o in tx.outputs)
         if input_total < output_total:
             return f"block {block.index} tx {tx.tx_id}: outputs exceed inputs"
+        total_fees += input_total - output_total
+
+    # Coinbase reward must equal BLOCK_REWARD + total fees collected
+    coinbase = block.transactions[0]
+    coinbase_total = sum(o.amount for o in coinbase.outputs)
+    expected_reward = BLOCK_REWARD + total_fees
+    if coinbase_total != expected_reward:
+        return (
+            f"block {block.index}: coinbase pays {coinbase_total}, "
+            f"expected {expected_reward} (reward {BLOCK_REWARD} + fees {total_fees})"
+        )
 
     return None
 

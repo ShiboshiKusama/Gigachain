@@ -114,12 +114,13 @@ def meets_target(hash_hex: str, difficulty: int = DIFFICULTY) -> bool:
 # Constructors
 # ---------------------------------------------------------------------------
 
-def make_coinbase(miner_address: str, block_index: int) -> Transaction:
+def make_coinbase(miner_address: str, block_index: int, fees: int = 0) -> Transaction:
     """Coinbase transaction. Uses a sentinel input encoding block height
-    to ensure unique tx_id per block. Coinbase inputs are unsigned."""
+    to ensure unique tx_id per block. Coinbase inputs are unsigned.
+    `fees` is the total transaction fees collected from the block."""
     return Transaction(
         inputs=[Input(tx_id=COINBASE_TX_ID, output_index=block_index)],
-        outputs=[Output(recipient=miner_address, amount=BLOCK_REWARD)],
+        outputs=[Output(recipient=miner_address, amount=BLOCK_REWARD + fees)],
     )
 
 
