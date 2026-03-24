@@ -47,6 +47,14 @@ class Transaction:
     tx_id: str = field(default="", init=False)
 
     def __post_init__(self):
+        if self.data:
+            if self.data.startswith("0x") or self.data.startswith("0X"):
+                self.data = self.data[2:]
+            self.data = self.data.lower()
+            try:
+                bytes.fromhex(self.data)
+            except ValueError:
+                raise ValueError(f"Transaction.data is not valid hex: {self.data!r}")
         self.tx_id = compute_tx_id(self)
 
 

@@ -209,20 +209,12 @@ class TestInscriptionInBlock:
         with pytest.raises(ValueError, match="inscription data exceeds"):
             add_block(chain, block)
 
-    def test_invalid_hex_data_rejected_by_chain(self):
-        """A transaction with non-hex data is rejected at block validation."""
-        wallet, chain = funded_wallet_and_chain()
-        coinbase_tx_id = chain[1].transactions[0].tx_id
-        inp = Input(tx_id=coinbase_tx_id, output_index=0)
+    def test_invalid_hex_data_rejected_at_construction(self):
+        """A transaction with non-hex data is rejected when constructed."""
+        inp = Input(tx_id="a" * 64, output_index=0)
         out = Output(recipient="recipient", amount=BLOCK_REWARD)
-        # 'data' is not valid hex
-        tx = Transaction(inputs=[inp], outputs=[out], data="not-valid-hex!")
-        sig = sign_transaction(wallet, tx.inputs, tx.outputs, tx.data)
-        tx.inputs[0].signature = sig
-        tx.inputs[0].public_key = wallet.public_key_hex()
-        block = mine_block(chain[-1], [tx], "miner")
-        with pytest.raises(ValueError, match="inscription data is not valid hex"):
-            add_block(chain, block)
+        with pytest.raises(ValueError, match="not valid hex"):
+            Transaction(inputs=[inp], outputs=[out], data="not-valid-hex!")
 
 
 # ---------------------------------------------------------------------------
