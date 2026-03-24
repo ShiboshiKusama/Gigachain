@@ -3,8 +3,25 @@ import time
 from dataclasses import dataclass, field
 
 
-BLOCK_REWARD = 50  # placeholder; real value set in Phase 2
+# ---------------------------------------------------------------------------
+# Chain constants
+# NOTE: SHA-256 is used as a prototype placeholder only.
+#       The final hash function will be evaluated for CPU-friendliness
+#       before any real network launch.
+# ---------------------------------------------------------------------------
 
+BLOCK_REWARD = 50
+
+# Number of leading hex zeros required for a valid block hash.
+# Fixed in Phase 2; dynamic adjustment comes in a later phase.
+DIFFICULTY = 4
+
+COINBASE_TX_ID = "0" * 64  # sentinel: marks a coinbase input
+
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Output:
@@ -74,16 +91,27 @@ def compute_block_hash(block: Block) -> str:
     return _sha256(serialized)
 
 
+def meets_target(hash_hex: str, difficulty: int = DIFFICULTY) -> bool:
+    """Return True if hash_hex starts with `difficulty` leading zero hex chars."""
+    return hash_hex.startswith("0" * difficulty)
+
+
 # ---------------------------------------------------------------------------
 # Constructors
 # ---------------------------------------------------------------------------
 
-def make_coinbase(recipient: str) -> Transaction:
-    return Transaction(inputs=[], outputs=[Output(recipient=recipient, amount=BLOCK_REWARD)])
+def make_coinbase(miner_address: str, block_index: int) -> Transaction:
+    """Coinbase transaction. Uses a sentinel input encoding block height
+    to ensure unique tx_id per block (avoids collision when recipient
+    and amount are identical across blocks)."""
+    return Transaction(
+        inputs=[Input(tx_id=COINBASE_TX_ID, output_index=block_index)],
+        outputs=[Output(recipient=miner_address, amount=BLOCK_REWARD)],
+    )
 
 
 def new_genesis(miner_address: str = "genesis") -> Block:
-    coinbase = make_coinbase(miner_address)
+    coinbase = make_coinbase(miner_address, 0)
     return Block(
         index=0,
         timestamp=int(time.time()),

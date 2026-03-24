@@ -1,4 +1,8 @@
-from .block import Block, Transaction, Input, Output, compute_block_hash, compute_merkle_root
+from .block import (
+    Block, Transaction, Input, Output,
+    compute_block_hash, compute_merkle_root,
+    meets_target, COINBASE_TX_ID, DIFFICULTY,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -15,15 +19,21 @@ def get_utxo_set(chain: list[Block]) -> dict[tuple[str, int], Output]:
             # Add all outputs
             for idx, output in enumerate(tx.outputs):
                 utxos[(tx.tx_id, idx)] = output
-            # Remove spent outputs
+            # Remove spent outputs; skip coinbase sentinel inputs
             for inp in tx.inputs:
-                utxos.pop((inp.tx_id, inp.output_index), None)
+                if inp.tx_id != COINBASE_TX_ID:
+                    utxos.pop((inp.tx_id, inp.output_index), None)
     return utxos
 
 
 # ---------------------------------------------------------------------------
-# Validation
+# Validation helpers
 # ---------------------------------------------------------------------------
+
+def _is_coinbase(tx: Transaction) -> bool:
+    """A coinbase transaction has exactly one input with the sentinel tx_id."""
+    return len(tx.inputs) == 1 and tx.inputs[0].tx_id == COINBASE_TX_ID
+
 
 def _validate_block(block: Block, previous: Block | None, utxos_before_block: dict) -> str | None:
     """Return an error string or None if valid."""
@@ -47,21 +57,31 @@ def _validate_block(block: Block, previous: Block | None, utxos_before_block: di
     if block.hash != expected_hash:
         return f"block {block.index}: hash mismatch"
 
+    # Difficulty target — enforced on all blocks except genesis
+    if previous is not None and not meets_target(block.hash, DIFFICULTY):
+        return f"block {block.index}: hash does not meet difficulty target ({DIFFICULTY} leading zeros)"
+
     # Merkle root integrity
     expected_merkle = compute_merkle_root(block.transactions)
     if block.merkle_root != expected_merkle:
         return f"block {block.index}: merkle_root mismatch"
 
-    # Transactions: coinbase must be first
+    # Transactions: must have at least one; first must be coinbase
     if not block.transactions:
         return f"block {block.index}: must have at least one transaction (coinbase)"
-    coinbase = block.transactions[0]
-    if coinbase.inputs:
-        return f"block {block.index}: first transaction must be coinbase (no inputs)"
+    if not _is_coinbase(block.transactions[0]):
+        return f"block {block.index}: first transaction must be a coinbase"
+
+    # Coinbase input must encode this block's index
+    coinbase_height = block.transactions[0].inputs[0].output_index
+    if coinbase_height != block.index:
+        return f"block {block.index}: coinbase input encodes wrong block height ({coinbase_height})"
 
     # Validate non-coinbase transactions against utxos_before_block
     spent_in_block: set[tuple[str, int]] = set()
     for tx in block.transactions[1:]:
+        if _is_coinbase(tx):
+            return f"block {block.index}: only first transaction may be coinbase"
         input_total = 0
         for inp in tx.inputs:
             key = (inp.tx_id, inp.output_index)
@@ -78,6 +98,10 @@ def _validate_block(block: Block, previous: Block | None, utxos_before_block: di
     return None
 
 
+# ---------------------------------------------------------------------------
+# Chain validation
+# ---------------------------------------------------------------------------
+
 def validate_chain(chain: list[Block]) -> tuple[bool, str | None]:
     """Validate every block from genesis to tip. Returns (ok, error_or_None)."""
     utxos: dict[tuple[str, int], Output] = {}
@@ -91,7 +115,8 @@ def validate_chain(chain: list[Block]) -> tuple[bool, str | None]:
             for idx, output in enumerate(tx.outputs):
                 utxos[(tx.tx_id, idx)] = output
             for inp in tx.inputs:
-                utxos.pop((inp.tx_id, inp.output_index), None)
+                if inp.tx_id != COINBASE_TX_ID:
+                    utxos.pop((inp.tx_id, inp.output_index), None)
     return True, None
 
 
