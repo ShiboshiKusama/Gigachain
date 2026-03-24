@@ -44,13 +44,15 @@ def tx_to_dict(tx: Transaction) -> dict:
     return {
         "inputs": [input_to_dict(i) for i in tx.inputs],
         "outputs": [output_to_dict(o) for o in tx.outputs],
+        "data": tx.data,
     }
 
 
-def tx_from_dict(data: dict) -> Transaction:
+def tx_from_dict(d: dict) -> Transaction:
     return Transaction(
-        inputs=[input_from_dict(i) for i in data["inputs"]],
-        outputs=[output_from_dict(o) for o in data["outputs"]],
+        inputs=[input_from_dict(i) for i in d["inputs"]],
+        outputs=[output_from_dict(o) for o in d["outputs"]],
+        data=d.get("data", ""),
     )
 
 

@@ -14,11 +14,12 @@ What is signed
 --------------
 Each transaction is signed over the serialized tx content, EXCLUDING signatures:
 
-    message = "{inp0_tx_id}:{inp0_out_idx},...|{out0_recipient}:{out0_amount},..."
+    message = "{inp0_tx_id}:{inp0_out_idx},...|{out0_recipient}:{out0_amount},...|{data}"
 
 This is the same string used as the preimage of compute_tx_id (before SHA-256).
+`data` is the hex-encoded inscription string; empty string for non-inscription txs.
 The message is deterministic and reproducible by any node from the transaction data.
-The signature commits to all inputs (what is spent) and all outputs (where funds go).
+The signature commits to all inputs, all outputs, and the inscription data.
 All inputs in a transaction carry the same signature over this full content.
 Signatures are never part of tx_id computation.
 Coinbase transactions are unsigned.
@@ -113,30 +114,32 @@ def _decompress_public_key(compressed: bytes) -> bytes:
 # Signing message
 # ---------------------------------------------------------------------------
 
-def _tx_signing_message(inputs: list, outputs: list) -> str:
+def _tx_signing_message(inputs: list, outputs: list, data: str = "") -> str:
     """
     Build the canonical message that is signed.
 
     Identical to the preimage used in compute_tx_id — excludes signature fields.
+    Includes inscription data so signatures cover the full transaction content.
     All nodes reconstruct this string the same way for verification to work.
     """
     inputs_part = ",".join(f"{i.tx_id}:{i.output_index}" for i in inputs)
     outputs_part = ",".join(f"{o.recipient}:{o.amount}" for o in outputs)
-    return f"{inputs_part}|{outputs_part}"
+    return f"{inputs_part}|{outputs_part}|{data}"
 
 
 # ---------------------------------------------------------------------------
 # Sign and verify
 # ---------------------------------------------------------------------------
 
-def sign_transaction(wallet: Wallet, inputs: list, outputs: list) -> str:
+def sign_transaction(wallet: Wallet, inputs: list, outputs: list, data: str = "") -> str:
     """
-    Sign a transaction's inputs and outputs (excluding signature fields).
+    Sign a transaction's inputs, outputs, and inscription data (excluding signature fields).
 
     Returns DER signature as hex. The same signature is placed on every input
     in the transaction — all inputs share one signature over the full tx content.
+    `data` defaults to "" for non-inscription transactions.
     """
-    message = _tx_signing_message(inputs, outputs)
+    message = _tx_signing_message(inputs, outputs, data)
     return wallet.sign(message)
 
 
@@ -145,15 +148,16 @@ def verify_transaction_signature(
     public_key_hex: str,
     inputs: list,
     outputs: list,
+    data: str = "",
 ) -> bool:
     """
     Verify a transaction signature.
 
-    Reconstructs the signing message from inputs and outputs (same as sign_transaction),
-    then checks the signature against the provided public key.
+    Reconstructs the signing message from inputs, outputs, and inscription data
+    (same as sign_transaction), then checks the signature against the public key.
     Returns True if valid, False otherwise.
     """
-    message = _tx_signing_message(inputs, outputs).encode("utf-8")
+    message = _tx_signing_message(inputs, outputs, data).encode("utf-8")
     try:
         pub_bytes = bytes.fromhex(public_key_hex)
         vk = VerifyingKey.from_string(

@@ -74,7 +74,7 @@ class Mempool:
                     return False, f"input {key} public key does not match UTXO recipient"
 
                 if not verify_transaction_signature(
-                    inp.signature, inp.public_key, tx.inputs, tx.outputs
+                    inp.signature, inp.public_key, tx.inputs, tx.outputs, tx.data
                 ):
                     return False, f"input {key} has invalid signature"
 

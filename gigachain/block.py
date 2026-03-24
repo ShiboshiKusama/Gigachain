@@ -43,6 +43,7 @@ class Input:
 class Transaction:
     inputs: list[Input]
     outputs: list[Output]
+    data: str = ""          # hex-encoded inscription data; empty string = no inscription
     tx_id: str = field(default="", init=False)
 
     def __post_init__(self):
@@ -73,12 +74,11 @@ def _sha256(data: str) -> str:
 
 
 def compute_tx_id(tx: Transaction) -> str:
-    # Signatures are excluded from tx_id: the id commits to what is being spent
-    # and what outputs are created, not to the signatures themselves.
-    # This matches the standard UTXO model.
+    # Signatures are excluded: tx_id commits to inputs, outputs, and inscription data.
+    # data="" for non-inscription transactions; the format is always deterministic.
     inputs_part = ",".join(f"{i.tx_id}:{i.output_index}" for i in tx.inputs)
     outputs_part = ",".join(f"{o.recipient}:{o.amount}" for o in tx.outputs)
-    return _sha256(f"{inputs_part}|{outputs_part}")
+    return _sha256(f"{inputs_part}|{outputs_part}|{tx.data}")
 
 
 def compute_merkle_root(transactions: list[Transaction]) -> str:

@@ -4,6 +4,7 @@ from .block import (
     meets_target, COINBASE_TX_ID, DIFFICULTY,
 )
 from .wallet import verify_transaction_signature, public_key_hex_to_address
+from .inscription import MAX_INSCRIPTION_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +82,17 @@ def _validate_block(block: Block, previous: Block | None, utxos_before_block: di
     # Validate non-coinbase transactions
     spent_in_block: set[tuple[str, int]] = set()
     for tx in block.transactions[1:]:
+        # Inscription data: must be valid hex and within size limit
+        if tx.data:
+            try:
+                raw = bytes.fromhex(tx.data)
+            except ValueError:
+                return f"block {block.index} tx {tx.tx_id}: inscription data is not valid hex"
+            if len(raw) > MAX_INSCRIPTION_SIZE:
+                return (
+                    f"block {block.index} tx {tx.tx_id}: "
+                    f"inscription data exceeds {MAX_INSCRIPTION_SIZE} bytes"
+                )
         if _is_coinbase(tx):
             return f"block {block.index}: only first transaction may be coinbase"
 
@@ -120,9 +132,9 @@ def _validate_block(block: Block, previous: Block | None, utxos_before_block: di
                     f"input {key} public key does not match UTXO recipient"
                 )
 
-            # Signature must be valid over the transaction content
+            # Signature must be valid over the transaction content (including data)
             if not verify_transaction_signature(
-                inp.signature, inp.public_key, tx.inputs, tx.outputs
+                inp.signature, inp.public_key, tx.inputs, tx.outputs, tx.data
             ):
                 return (
                     f"block {block.index} tx {tx.tx_id}: "
