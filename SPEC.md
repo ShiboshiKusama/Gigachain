@@ -106,6 +106,8 @@ Serialization for inputs: `"{tx_id}:{output_index}"` joined by `,`
 Serialization for outputs: `"{recipient}:{amount}"` joined by `,`
 Combined: `"{serialized_inputs}|{serialized_outputs}"`
 
+**Ordering rule:** Inputs and outputs are serialized in the exact order they appear in the transaction. This order is canonical. Reordering inputs or outputs produces a different `tx_id` and is treated as a different transaction. Order must not be changed during validation.
+
 ---
 
 ## Chain Rules
@@ -128,6 +130,8 @@ A chain is valid only if all rules pass for every block from genesis to tip.
 4. No transaction may reference an output from a block at the same height or later.
 
 Signatures are **not validated** in Phase 1. The input fields for signature are omitted entirely.
+
+**UTXO set derivation:** The UTXO set is computed by scanning the chain from genesis to tip. For each block, add all outputs to the set. For each input in each transaction, remove the referenced output from the set. The result is the complete set of currently spendable outputs. There is no other authoritative source for the UTXO set.
 
 ---
 
