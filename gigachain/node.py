@@ -1,5 +1,5 @@
 """
-Node — Phase 4
+Node — Phase 4 / 4.5
 
 Minimal peer-to-peer node over plain TCP.
 
@@ -10,9 +10,10 @@ Message framing: 4-byte big-endian length prefix + UTF-8 JSON payload.
 
 Message types
 -------------
-  GET_CHAIN               — request the node's full chain
-  CHAIN   {blocks: [...]} — response carrying the full chain
-  NEW_BLOCK {block: {...}} — broadcast a newly mined block
+  GET_CHAIN                  — request the node's full chain
+  CHAIN        {blocks:[..]} — respond with full chain
+  NEW_BLOCK    {block:{..}}  — broadcast a newly mined block
+  NEW_TRANSACTION {tx:{..}}  — broadcast an unconfirmed transaction
 
 Chain selection rule
 --------------------
@@ -22,15 +23,23 @@ A peer's chain replaces the local chain if and only if:
 
 Since difficulty is fixed, chain length equals cumulative work.
 Peer data is never trusted without full validation.
+
+Mempool
+-------
+Each node maintains a local mempool. Received transactions are validated
+before being added. After a block is accepted, its transactions are removed
+from the mempool. After a chain replacement, the mempool is revalidated
+against the new UTXO set.
 """
 
 import json
 import socket
 import threading
 
-from .block import Block, new_genesis
-from .chain import add_block, validate_chain
-from .serialization import block_to_dict, block_from_dict
+from .block import Block, Transaction, new_genesis
+from .chain import add_block, validate_chain, get_utxo_set
+from .mempool import Mempool
+from .serialization import block_to_dict, block_from_dict, tx_to_dict, tx_from_dict
 
 
 # ---------------------------------------------------------------------------
@@ -68,16 +77,17 @@ class Node:
     A single Gigachain node.
 
     Responsibilities:
-    - Maintains a local chain
+    - Maintains a local chain and mempool
     - Serves chain requests from peers (TCP server)
-    - Can sync its chain from a peer
-    - Can broadcast new blocks to a list of peers
+    - Syncs chain from peers
+    - Broadcasts new blocks and transactions to peers
     """
 
     def __init__(self, host: str, port: int, chain: list[Block] | None = None):
         self.host = host
         self.port = port
         self.chain: list[Block] = chain if chain is not None else [new_genesis(host)]
+        self.mempool: Mempool = Mempool()
         self._lock = threading.Lock()
         self._server_sock: socket.socket | None = None
         self._running = False
@@ -129,18 +139,27 @@ class Node:
                 peer_addr = msg.get("sender")
                 self._handle_new_block(block, peer_addr)
 
+            elif msg_type == "NEW_TRANSACTION":
+                tx = tx_from_dict(msg["tx"])
+                utxo_set = get_utxo_set(self.get_chain())
+                self.mempool.add(tx, utxo_set)  # silently discard invalid
+
         except Exception:
             pass
         finally:
             conn.close()
 
+    # ------------------------------------------------------------------
+    # Block handling
+    # ------------------------------------------------------------------
+
     def _handle_new_block(self, block: Block, sender: str | None) -> None:
         """
         Handle a broadcast NEW_BLOCK message.
 
-        If the block connects cleanly to the current tip, append it.
-        If it does not (wrong index or previous_hash), trigger a full sync
-        from the sender — the peer may have a longer valid chain we haven't seen.
+        If the block connects cleanly to the current tip, validate and append it,
+        then clean the mempool. If it does not connect, trigger a full sync from
+        the sender — the peer may have a longer chain we haven't seen.
         """
         with self._lock:
             tip = self.chain[-1]
@@ -150,29 +169,38 @@ class Node:
             )
 
         if connects:
+            accepted = False
             with self._lock:
                 try:
                     add_block(self.chain, block)
+                    accepted = True
                 except (ValueError, Exception):
                     pass  # invalid block — discard silently
+            if accepted:
+                self._clean_mempool_after_block(block)
         elif sender:
-            # Block doesn't connect: request the full chain from this peer
             try:
                 host, port = sender.split(":")
                 self.sync_from(host, int(port))
             except Exception:
                 pass
 
+    def _clean_mempool_after_block(self, block: Block) -> None:
+        """Remove transactions confirmed in `block` from the mempool."""
+        tx_ids = [tx.tx_id for tx in block.transactions]
+        self.mempool.remove(tx_ids)
+
     # ------------------------------------------------------------------
-    # Outbound operations
+    # Outbound: chain sync
     # ------------------------------------------------------------------
 
     def sync_from(self, host: str, port: int) -> bool:
         """
         Request the full chain from a peer and replace local chain if:
         - the peer chain is fully valid
-        - the peer chain is longer than the local chain
+        - the peer chain is strictly longer than the local chain
 
+        On replacement, the mempool is revalidated against the new UTXO set.
         Returns True if the local chain was replaced.
         """
         try:
@@ -195,18 +223,28 @@ class Node:
         if not ok:
             return False
 
+        replaced = False
         with self._lock:
             if len(peer_chain) > len(self.chain):
                 self.chain = peer_chain
-                return True
+                replaced = True
 
-        return False
+        if replaced:
+            # Revalidate mempool: drop txs whose UTXOs are now consumed
+            new_utxo_set = get_utxo_set(self.get_chain())
+            self.mempool.revalidate(new_utxo_set)
+
+        return replaced
+
+    # ------------------------------------------------------------------
+    # Outbound: broadcast
+    # ------------------------------------------------------------------
 
     def broadcast_block(self, block: Block, peers: list[tuple[str, int]]) -> None:
         """
         Send a NEW_BLOCK message to each peer.
 
-        Includes the sender address so the receiver can trigger a full sync
+        Includes sender address so the receiver can trigger a full sync
         if the block does not connect to its current tip.
         Failures are silently ignored — broadcast is best-effort.
         """
@@ -223,6 +261,32 @@ class Node:
                 conn.close()
             except Exception:
                 pass
+
+    def broadcast_transaction(self, tx: Transaction, peers: list[tuple[str, int]]) -> None:
+        """
+        Send a NEW_TRANSACTION message to each peer.
+        Failures are silently ignored — broadcast is best-effort.
+        """
+        tx_data = tx_to_dict(tx)
+        for host, port in peers:
+            try:
+                conn = socket.create_connection((host, port), timeout=5)
+                _send_msg(conn, {"type": "NEW_TRANSACTION", "tx": tx_data})
+                conn.close()
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # Mempool interface
+    # ------------------------------------------------------------------
+
+    def add_transaction(self, tx: Transaction) -> tuple[bool, str | None]:
+        """
+        Validate and add a transaction to the local mempool.
+        Returns (True, None) on success or (False, reason) on rejection.
+        """
+        utxo_set = get_utxo_set(self.get_chain())
+        return self.mempool.add(tx, utxo_set)
 
     # ------------------------------------------------------------------
     # Chain accessors (thread-safe)
