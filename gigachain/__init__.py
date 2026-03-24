@@ -27,3 +27,10 @@ from .wallet import (
     verify_transaction_signature,
     public_key_hex_to_address,
 )
+from .serialization import (
+    block_to_dict,
+    block_from_dict,
+    tx_to_dict,
+    tx_from_dict,
+)
+from .node import Node
