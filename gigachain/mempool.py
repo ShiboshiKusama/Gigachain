@@ -20,6 +20,7 @@ UTXO set and any that are no longer valid are dropped.
 """
 
 import threading
+from typing import Optional, Tuple
 
 from .block import Transaction, COINBASE_TX_ID
 from .wallet import verify_transaction_signature, public_key_hex_to_address
@@ -40,7 +41,7 @@ class Mempool:
     # Add
     # ------------------------------------------------------------------
 
-    def add(self, tx: Transaction, utxo_set: dict) -> tuple[bool, str | None]:
+    def add(self, tx: Transaction, utxo_set: dict) -> Tuple[bool, Optional[str]]:
         """
         Validate and add a transaction.
 

@@ -1,3 +1,5 @@
+from typing import Optional, Tuple
+
 from .block import (
     Block, Transaction, Input, Output,
     compute_block_hash, compute_merkle_root,
@@ -37,7 +39,7 @@ def _is_coinbase(tx: Transaction) -> bool:
     return len(tx.inputs) == 1 and tx.inputs[0].tx_id == COINBASE_TX_ID
 
 
-def _validate_block(block: Block, previous: Block | None, utxos_before_block: dict) -> str | None:
+def _validate_block(block: Block, previous: Optional[Block], utxos_before_block: dict) -> Optional[str]:
     """Return an error string or None if valid."""
 
     # Genesis rules
@@ -166,7 +168,7 @@ def _validate_block(block: Block, previous: Block | None, utxos_before_block: di
 # Chain validation
 # ---------------------------------------------------------------------------
 
-def validate_chain(chain: list[Block]) -> tuple[bool, str | None]:
+def validate_chain(chain: list[Block]) -> Tuple[bool, Optional[str]]:
     """Validate every block from genesis to tip. Returns (ok, error_or_None)."""
     utxos: dict[tuple[str, int], Output] = {}
     for i, block in enumerate(chain):

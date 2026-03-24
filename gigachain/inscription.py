@@ -9,6 +9,8 @@ Storage model: a `data` field on Transaction (hex string, empty = no inscription
 Indexer: scans a chain and returns all inscriptions keyed by tx_id.
 """
 
+from typing import Optional
+
 from .block import Block, Transaction, Input, Output
 
 # Maximum raw byte size for inscription data per transaction.
@@ -56,7 +58,7 @@ class Indexer:
                 if tx.data:
                     self._index[tx.tx_id] = tx.data
 
-    def get(self, tx_id: str) -> bytes | None:
+    def get(self, tx_id: str) -> Optional[bytes]:
         """
         Return the raw bytes for an inscription, or None if not found.
         """
