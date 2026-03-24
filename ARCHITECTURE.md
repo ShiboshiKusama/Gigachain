@@ -21,6 +21,29 @@ Phase 1 uses a simplified UTXO structure without signatures. Signatures are adde
 
 SHA-256 is used only as a **learning prototype** in early phases. The final chain hash function must be CPU-friendly and resistant to ASIC and GPU optimization. The hash function choice will be evaluated before any real network launch.
 
+## Mining Difficulty
+
+Difficulty defines how hard it is to produce a valid block hash. A block is valid when its hash has at least N leading zero bits (or equivalently, N leading hex zeros).
+
+- **Phase 1** — difficulty is not enforced (nonce is always 0; no mining loop)
+- **Phase 2** — difficulty is a fixed constant; the miner increments the nonce until the hash meets the target
+- **Later phases** — dynamic difficulty adjustment based on average block time
+
+## Merkle Root
+
+The merkle root is a single hash that commits to all transactions in the block. It is built by hashing pairs of transaction hashes up a binary tree until one root hash remains. If the transaction count is odd, the last hash is duplicated before pairing.
+
+This allows a node to verify that a specific transaction is in a block without downloading all transactions.
+
+## Coinbase Transaction
+
+Every block must include a coinbase transaction as its first transaction. The coinbase:
+
+- Has no inputs
+- Creates new coins as the block reward (a fixed constant per block)
+- Pays the reward to the miner's address
+- Is the only transaction permitted to create coins from nothing
+
 ## Data Flow
 
 ```

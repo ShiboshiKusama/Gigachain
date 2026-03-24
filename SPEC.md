@@ -12,28 +12,49 @@ Phase 1 is intentionally minimal. The goal is a working in-memory chain with cor
 | `timestamp` | integer | Unix time in seconds |
 | `previous_hash` | string (64 hex chars) | Hash of the prior block; all zeros for genesis |
 | `nonce` | integer | Reserved for PoW (Phase 2); set to 0 in Phase 1 |
-| `transactions` | list of Transaction | Ordered list of transactions in this block |
-| `hash` | string (64 hex chars) | Computed from block contents; not stored in the input to its own hash |
+| `transactions` | list of Transaction | Ordered list of transactions in this block; coinbase is always first |
+| `merkle_root` | string (64 hex chars) | Commitment to all transactions; see Merkle Root below |
+| `hash` | string (64 hex chars) | Computed from block contents; never trusted as stored data |
 
 ### Hash Rule
 
-The block hash is computed by the node — it is not trusted from external input.
+The block hash is always **recomputed by the node** from the block's fields. A stored hash value is never accepted at face value — it must be verified.
 
 ```
-hash = SHA256(serialize(index, timestamp, previous_hash, nonce, transactions))
+hash = SHA256(serialize(index, timestamp, previous_hash, nonce, merkle_root))
 ```
 
 SHA-256 is used here as a **prototype placeholder only**. The final chain hash function will be evaluated for CPU-friendliness before any real network launch.
 
 ### Serialization
 
-For Phase 1, serialize block fields as a UTF-8 string in this exact order:
+Block fields are serialized as a UTF-8 string in this fixed field order:
 
 ```
-"{index}:{timestamp}:{previous_hash}:{nonce}:{tx_hash_0},{tx_hash_1},...{tx_hash_n}"
+"{index}:{timestamp}:{previous_hash}:{nonce}:{merkle_root}"
 ```
 
-Where each `tx_hash_i` is the hash of that transaction (defined below). This is deterministic and easy to implement. The format can be replaced with a binary encoding later without changing the validation logic.
+Rules:
+- Fields are joined by `:` in the order listed above
+- No extra whitespace
+- Integer fields are decimal strings with no leading zeros (except `0` itself)
+
+This format is deterministic and unambiguous. It can be replaced with binary encoding later without changing validation logic.
+
+### Merkle Root
+
+The merkle root commits to all transactions in the block:
+
+1. Compute `tx_id` for each transaction (see Transaction Hash below)
+2. If only one transaction, merkle root = that `tx_id`
+3. Otherwise, hash pairs: `SHA256(left_tx_id + right_tx_id)` up a binary tree until one hash remains
+4. If the count at any level is odd, duplicate the last hash before pairing
+
+The merkle root is included in the block serialization and therefore covered by the block hash.
+
+### Difficulty (Phase 1)
+
+Difficulty is not enforced in Phase 1. The nonce is always 0 and no hash target is checked. Difficulty is defined and enforced starting in Phase 2.
 
 ---
 
@@ -129,7 +150,8 @@ A mempool can be implemented as a simple list of unconfirmed transactions. Accep
 | `validate_chain(chain)` | Check all rules from genesis to tip; return ok or first error |
 | `get_block(chain, index)` | Return block at given index |
 | `last_block(chain)` | Return the current chain tip |
-| `compute_hash(block)` | Compute and return the hash of a block |
+| `compute_hash(block)` | Recompute and return the hash of a block from its fields |
+| `compute_merkle_root(txs)` | Compute the merkle root from an ordered list of transactions |
 | `get_utxo_set(chain)` | Return all unspent outputs from the current chain |
 
 ---
