@@ -35,6 +35,7 @@ against the new UTXO set.
 import json
 import socket
 import threading
+from typing import Optional, List, Tuple
 
 from .block import Block, Transaction, new_genesis
 from .chain import add_block, validate_chain, get_utxo_set
@@ -83,13 +84,13 @@ class Node:
     - Broadcasts new blocks and transactions to peers
     """
 
-    def __init__(self, host: str, port: int, chain: list[Block] | None = None):
+    def __init__(self, host: str, port: int, chain: Optional[List[Block]] = None):
         self.host = host
         self.port = port
         self.chain: list[Block] = chain if chain is not None else [new_genesis(host)]
         self.mempool: Mempool = Mempool()
         self._lock = threading.Lock()
-        self._server_sock: socket.socket | None = None
+        self._server_sock: Optional[socket.socket] = None
         self._running = False
 
     # ------------------------------------------------------------------
@@ -153,7 +154,7 @@ class Node:
     # Block handling
     # ------------------------------------------------------------------
 
-    def _handle_new_block(self, block: Block, sender: str | None) -> None:
+    def _handle_new_block(self, block: Block, sender: Optional[str]) -> None:
         """
         Handle a broadcast NEW_BLOCK message.
 
@@ -280,7 +281,7 @@ class Node:
     # Mempool interface
     # ------------------------------------------------------------------
 
-    def add_transaction(self, tx: Transaction) -> tuple[bool, str | None]:
+    def add_transaction(self, tx: Transaction) -> Tuple[bool, Optional[str]]:
         """
         Validate and add a transaction to the local mempool.
         Returns (True, None) on success or (False, reason) on rejection.

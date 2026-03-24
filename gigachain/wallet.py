@@ -26,6 +26,8 @@ Coinbase transactions are unsigned.
 """
 
 import hashlib
+from typing import Optional
+
 from ecdsa import SigningKey, VerifyingKey, SECP256k1
 from ecdsa.util import sigencode_der, sigdecode_der
 
@@ -82,7 +84,7 @@ def _derive_address(vk: VerifyingKey) -> str:
     return hashlib.sha256(pub_bytes).hexdigest()[:40]
 
 
-def public_key_hex_to_address(pub_hex: str) -> str | None:
+def public_key_hex_to_address(pub_hex: str) -> Optional[str]:
     """Derive address from a compressed public key hex string. Returns None on error."""
     try:
         pub_bytes = bytes.fromhex(pub_hex)
