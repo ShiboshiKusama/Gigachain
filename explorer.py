@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
 """
 Gigachain Block Explorer
-Run: python explorer.py [--port 8080]
 
-Seeds a small demo chain on startup for visual inspection.
-No external dependencies beyond what gigachain already requires.
+Two modes:
+
+  Demo (default) — seeds a local chain, no node needed:
+    python explorer.py
+
+  Live — connects to a running Gigachain node:
+    python explorer.py --node 127.0.0.1:9000
+
+Options:
+  --port PORT        HTTP port for the explorer (default: 8080)
+  --node HOST:PORT   Fetch chain from this node on every request
+
+No dependencies beyond what gigachain already uses.
 """
 import argparse
 import html as _html
+import json
+import socket
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -17,17 +29,47 @@ from gigachain import (
     Wallet, new_genesis, mine_block, add_block, get_utxo_set,
     sign_transaction, BLOCK_REWARD, COINBASE_TX_ID,
 )
-from gigachain.block import Input, Output, Transaction
+from gigachain.block import Block, Input, Output, Transaction
 from gigachain.inscription import make_inscription_tx, Indexer
+from gigachain.serialization import block_from_dict
+
 
 # ---------------------------------------------------------------------------
-# Demo chain
+# Live node client — uses the existing GET_CHAIN TCP protocol
+# ---------------------------------------------------------------------------
+
+def _recv_exact(sock: socket.socket, n: int) -> bytes:
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("connection closed")
+        buf += chunk
+    return buf
+
+
+def fetch_chain_from_node(host: str, port: int) -> list[Block]:
+    """Pull the full chain from a running node via its TCP GET_CHAIN message."""
+    conn = socket.create_connection((host, port), timeout=5)
+    try:
+        payload = json.dumps({"type": "GET_CHAIN"}).encode("utf-8")
+        conn.sendall(len(payload).to_bytes(4, "big") + payload)
+        length = int.from_bytes(_recv_exact(conn, 4), "big")
+        resp = json.loads(_recv_exact(conn, length).decode("utf-8"))
+    finally:
+        conn.close()
+    if resp.get("type") != "CHAIN":
+        raise ValueError(f"unexpected response type: {resp.get('type')}")
+    return [block_from_dict(b) for b in resp["blocks"]]
+
+
+# ---------------------------------------------------------------------------
+# Demo chain — used when no --node is given
 # ---------------------------------------------------------------------------
 
 def build_demo_chain():
-    """Mine a few blocks with real transactions and one inscription."""
     alice = Wallet.generate()
-    bob = Wallet.generate()
+    bob   = Wallet.generate()
     miner = Wallet.generate()
 
     genesis = new_genesis(miner.address)
@@ -37,71 +79,91 @@ def build_demo_chain():
     b1 = mine_block(genesis, [], miner.address)
     add_block(chain, b1)
 
-    # Block 2 — miner sends 10 to alice, keeps change
+    # Block 2 — miner → alice 10, fee 1
     utxos = get_utxo_set(chain)
-    (m_tx_id, m_out_idx), m_utxo = next(
-        (k, v) for k, v in utxos.items() if v.recipient == miner.address
-    )
-    inp_a = Input(tx_id=m_tx_id, output_index=m_out_idx)
-    outs_a = [
-        Output(recipient=alice.address, amount=10),
-        Output(recipient=miner.address, amount=m_utxo.amount - 11),  # 1 coin fee
-    ]
-    sig_a = sign_transaction(miner, [inp_a], outs_a)
-    inp_a.signature = sig_a
-    inp_a.public_key = miner.public_key_hex()
-    tx_a = Transaction(inputs=[inp_a], outputs=outs_a)
-
-    b2 = mine_block(b1, [tx_a], miner.address, fees=1)
+    (m_tid, m_oi), m_utxo = next((k, v) for k, v in utxos.items() if v.recipient == miner.address)
+    inp1 = Input(tx_id=m_tid, output_index=m_oi)
+    outs1 = [Output(recipient=alice.address, amount=10),
+             Output(recipient=miner.address, amount=m_utxo.amount - 11)]
+    sig1 = sign_transaction(miner, [inp1], outs1)
+    inp1.signature, inp1.public_key = sig1, miner.public_key_hex()
+    tx1 = Transaction(inputs=[inp1], outputs=outs1)
+    b2 = mine_block(b1, [tx1], miner.address, fees=1)
     add_block(chain, b2)
 
-    # Block 3 — alice sends 5 to bob with an inscription
+    # Block 3 — alice → bob 5 with inscription, fee 1
     utxos = get_utxo_set(chain)
-    (a_tx_id, a_out_idx), a_utxo = next(
-        (k, v) for k, v in utxos.items() if v.recipient == alice.address
-    )
-    inscription_data = b"Hello, Gigachain! First inscription on the chain."
-    data_hex = inscription_data.hex()
-
-    inp_b = Input(tx_id=a_tx_id, output_index=a_out_idx)
-    outs_b = [
-        Output(recipient=bob.address, amount=5),
-        Output(recipient=alice.address, amount=a_utxo.amount - 6),  # 1 coin fee
-    ]
-    sig_b = sign_transaction(alice, [inp_b], outs_b, data_hex)
-    inp_b.signature = sig_b
-    inp_b.public_key = alice.public_key_hex()
-    tx_b = make_inscription_tx([inp_b], outs_b, inscription_data)
-
-    b3 = mine_block(b2, [tx_b], miner.address, fees=1)
+    (a_tid, a_oi), a_utxo = next((k, v) for k, v in utxos.items() if v.recipient == alice.address)
+    idata = b"Hello, Gigachain! First inscription on the chain."
+    inp2 = Input(tx_id=a_tid, output_index=a_oi)
+    outs2 = [Output(recipient=bob.address,   amount=5),
+             Output(recipient=alice.address, amount=a_utxo.amount - 6)]
+    sig2 = sign_transaction(alice, [inp2], outs2, idata.hex())
+    inp2.signature, inp2.public_key = sig2, alice.public_key_hex()
+    tx2 = make_inscription_tx([inp2], outs2, idata)
+    b3 = mine_block(b2, [tx2], miner.address, fees=1)
     add_block(chain, b3)
 
-    # Block 4 — bob sends 3 to miner
+    # Block 4 — bob → miner 3, fee 1
     utxos = get_utxo_set(chain)
-    (b_tx_id, b_out_idx), b_utxo = next(
-        (k, v) for k, v in utxos.items() if v.recipient == bob.address
-    )
-    inp_c = Input(tx_id=b_tx_id, output_index=b_out_idx)
-    outs_c = [
-        Output(recipient=miner.address, amount=3),
-        Output(recipient=bob.address, amount=b_utxo.amount - 4),  # 1 coin fee
-    ]
-    sig_c = sign_transaction(bob, [inp_c], outs_c)
-    inp_c.signature = sig_c
-    inp_c.public_key = bob.public_key_hex()
-    tx_c = Transaction(inputs=[inp_c], outputs=outs_c)
-
-    b4 = mine_block(b3, [tx_c], miner.address, fees=1)
+    (b_tid, b_oi), b_utxo = next((k, v) for k, v in utxos.items() if v.recipient == bob.address)
+    inp3 = Input(tx_id=b_tid, output_index=b_oi)
+    outs3 = [Output(recipient=miner.address, amount=3),
+             Output(recipient=bob.address,   amount=b_utxo.amount - 4)]
+    sig3 = sign_transaction(bob, [inp3], outs3)
+    inp3.signature, inp3.public_key = sig3, bob.public_key_hex()
+    tx3 = Transaction(inputs=[inp3], outputs=outs3)
+    b4 = mine_block(b3, [tx3], miner.address, fees=1)
     add_block(chain, b4)
 
-    indexer = Indexer()
-    indexer.scan(chain)
+    return chain, {"miner": miner.address, "alice": alice.address, "bob": bob.address}
 
-    return chain, indexer, {
-        "miner": miner.address,
-        "alice": alice.address,
-        "bob": bob.address,
-    }
+
+# ---------------------------------------------------------------------------
+# Chain helpers
+# ---------------------------------------------------------------------------
+
+def build_tx_index(chain: list) -> dict:
+    return {tx.tx_id: tx for block in chain for tx in block.transactions}
+
+
+def compute_fee(tx: Transaction, tx_index: dict) -> int:
+    if tx.inputs[0].tx_id == COINBASE_TX_ID:
+        return 0
+    in_total = sum(
+        tx_index[inp.tx_id].outputs[inp.output_index].amount
+        for inp in tx.inputs
+        if inp.tx_id in tx_index and inp.output_index < len(tx_index[inp.tx_id].outputs)
+    )
+    return max(0, in_total - sum(o.amount for o in tx.outputs))
+
+
+def find_tx(tx_id: str, chain: list):
+    for block in chain:
+        for tx in block.transactions:
+            if tx.tx_id == tx_id:
+                return tx, block
+    return None, None
+
+
+def txs_for_address(addr: str, chain: list, tx_index: dict) -> list:
+    """Return (block, tx, received, sent) for every tx touching this address."""
+    results, seen = [], set()
+    for block in chain:
+        for tx in block.transactions:
+            is_cb = tx.inputs[0].tx_id == COINBASE_TX_ID
+            received = sum(o.amount for o in tx.outputs if o.recipient == addr)
+            sent = 0
+            if not is_cb:
+                for inp in tx.inputs:
+                    prev = tx_index.get(inp.tx_id)
+                    if prev and inp.output_index < len(prev.outputs):
+                        if prev.outputs[inp.output_index].recipient == addr:
+                            sent += prev.outputs[inp.output_index].amount
+            if (received or sent) and tx.tx_id not in seen:
+                seen.add(tx.tx_id)
+                results.append((block, tx, received, sent))
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -110,47 +172,69 @@ def build_demo_chain():
 
 CSS = """
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font: 15px/1.6 system-ui, sans-serif; background: #f8f9fa; color: #212529; }
-a { color: #0d6efd; text-decoration: none; }
+body { font: 15px/1.6 system-ui, sans-serif; background: #f5f6f8; color: #1e2025; }
+a { color: #2563eb; text-decoration: none; }
 a:hover { text-decoration: underline; }
-header { background: #1a1a2e; color: #fff; padding: 12px 24px; display: flex; align-items: center; gap: 16px; }
-header a { color: #a8d8ff; font-weight: 600; font-size: 1.1rem; }
-header span { color: #8899aa; font-size: 0.9rem; }
-main { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
-h1 { font-size: 1.3rem; margin-bottom: 16px; color: #1a1a2e; }
-h2 { font-size: 1.1rem; margin: 24px 0 10px; color: #333; }
-form.search { display: flex; gap: 8px; margin-bottom: 24px; }
-form.search input { flex: 1; padding: 8px 12px; border: 1px solid #ced4da; border-radius: 4px; font-size: 14px; font-family: monospace; }
-form.search button { padding: 8px 18px; background: #0d6efd; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
-form.search button:hover { background: #0b5ed7; }
-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 6px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-th { background: #e9ecef; text-align: left; padding: 8px 12px; font-size: 13px; color: #495057; }
-td { padding: 8px 12px; font-size: 13px; border-top: 1px solid #f0f0f0; vertical-align: top; }
-tr:hover td { background: #f8f9fa; }
-.mono { font-family: monospace; font-size: 12px; }
-.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-.badge-coinbase { background: #d1ecf1; color: #0c5460; }
-.badge-inscription { background: #d4edda; color: #155724; }
-.badge-regular { background: #e2e3e5; color: #383d41; }
-.card { background: #fff; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.08); padding: 16px 20px; margin-bottom: 16px; }
-.card dl { display: grid; grid-template-columns: 180px 1fr; gap: 6px 12px; }
-.card dt { font-size: 12px; color: #6c757d; font-weight: 600; text-transform: uppercase; padding-top: 2px; }
-.card dd { font-size: 13px; }
-.inscription-box { background: #f0fff4; border: 1px solid #b2dfdb; border-radius: 4px; padding: 12px 16px; margin-top: 8px; }
-.inscription-box pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; margin-top: 6px; }
-.balance-big { font-size: 2rem; font-weight: 700; color: #1a1a2e; }
-.known { font-size: 11px; color: #6c757d; }
-.error { color: #721c24; background: #f8d7da; padding: 16px; border-radius: 6px; }
-.tip { font-size: 12px; color: #6c757d; margin-bottom: 16px; }
+
+header { background: #111827; color: #fff; padding: 10px 24px;
+         display: flex; align-items: center; gap: 20px; }
+header .logo { color: #60a5fa; font-weight: 700; font-size: 1.05rem; }
+header .mode { color: #6b7280; font-size: 0.85rem; }
+
+main { max-width: 1080px; margin: 28px auto; padding: 0 16px; }
+
+h1 { font-size: 1.2rem; margin-bottom: 14px; color: #111827; }
+h2 { font-size: 0.95rem; margin: 20px 0 8px; color: #374151; font-weight: 600;
+     text-transform: uppercase; letter-spacing: .04em; }
+
+form.search { display: flex; gap: 8px; margin-bottom: 22px; }
+form.search input  { flex: 1; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 5px;
+                     font-size: 13px; font-family: monospace; background: #fff; }
+form.search button { padding: 8px 16px; background: #2563eb; color: #fff;
+                     border: none; border-radius: 5px; cursor: pointer; font-size: 13px; }
+form.search button:hover { background: #1d4ed8; }
+
+table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 7px;
+        overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.07); font-size: 13px; }
+th { background: #f3f4f6; text-align: left; padding: 7px 12px; color: #6b7280;
+     font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+td { padding: 8px 12px; border-top: 1px solid #f0f0f0; vertical-align: top; }
+tr:hover td { background: #f9fafb; }
+
+.mono  { font-family: monospace; font-size: 12px; }
+.dim   { color: #9ca3af; }
+.small { font-size: 11px; color: #9ca3af; }
+
+.badge { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px; font-weight: 600; }
+.cb    { background: #dbeafe; color: #1e40af; }
+.ins   { background: #d1fae5; color: #065f46; }
+.xfer  { background: #e5e7eb; color: #374151; }
+
+.card { background: #fff; border-radius: 7px; box-shadow: 0 1px 3px rgba(0,0,0,.07);
+        padding: 16px 20px; margin-bottom: 14px; }
+.card dl { display: grid; grid-template-columns: 160px 1fr; row-gap: 5px; column-gap: 12px; }
+.card dt { font-size: 11px; color: #6b7280; font-weight: 600; text-transform: uppercase; padding-top: 3px; }
+.card dd { font-size: 13px; word-break: break-all; }
+
+.bal   { font-size: 1.8rem; font-weight: 700; color: #111827; }
+.ibox  { background: #f0fdf4; border: 1px solid #86efac; border-radius: 5px;
+         padding: 12px 14px; margin-top: 6px; }
+.ibox pre { white-space: pre-wrap; word-break: break-all; font-size: 12px;
+            font-family: monospace; color: #374151; margin-top: 4px; }
+.stat  { font-size: 12px; color: #6b7280; margin-bottom: 14px; }
+.stat b { color: #111827; }
+.err   { color: #991b1b; background: #fee2e2; padding: 14px 16px; border-radius: 6px; }
+.warn  { color: #92400e; background: #fef3c7; padding: 14px 16px; border-radius: 6px; }
+.in    { color: #15803d; }
+.out   { color: #b91c1c; }
 """
 
 
-def h(text) -> str:
-    return _html.escape(str(text))
+def h(v) -> str:
+    return _html.escape(str(v))
 
 
-def page(title: str, body: str, search_val: str = "") -> str:
-    sv = h(search_val)
+def page(title: str, body: str, mode_label: str = "demo", q: str = "") -> str:
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -161,13 +245,13 @@ def page(title: str, body: str, search_val: str = "") -> str:
 </head>
 <body>
 <header>
-  <a href="/">&#9642; Gigachain Explorer</a>
-  <span>demo chain</span>
+  <a class="logo" href="/">&#9670; Gigachain Explorer</a>
+  <span class="mode">{h(mode_label)}</span>
 </header>
 <main>
   <form class="search" action="/search" method="get">
-    <input name="q" placeholder="Search by block height, tx_id, or address" value="{sv}">
-    <button type="submit">Search</button>
+    <input name="q" placeholder="Block height, tx_id, or address…" value="{h(q)}">
+    <button>Search</button>
   </form>
   {body}
 </main>
@@ -175,162 +259,183 @@ def page(title: str, body: str, search_val: str = "") -> str:
 </html>"""
 
 
-def fmt_hash(h_str: str, length: int = 16) -> str:
-    short = h_str[:length] + "…"
-    return f'<span class="mono" title="{h(h_str)}">{h(short)}</span>'
+def abbrev(s: str, n: int = 16) -> str:
+    return f'<span class="mono" title="{h(s)}">{h(s[:n])}…</span>'
 
 
-def fmt_time(ts: int) -> str:
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+def fmt_time(unix: int) -> str:
+    return datetime.fromtimestamp(unix, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def tx_type_badge(tx: Transaction) -> str:
-    if tx.inputs and tx.inputs[0].tx_id == COINBASE_TX_ID:
-        return '<span class="badge badge-coinbase">coinbase</span>'
+def badge(tx: Transaction) -> str:
+    if tx.inputs[0].tx_id == COINBASE_TX_ID:
+        return '<span class="badge cb">coinbase</span>'
     if tx.data:
-        return '<span class="badge badge-inscription">inscription</span>'
-    return '<span class="badge badge-regular">transfer</span>'
+        return '<span class="badge ins">inscription</span>'
+    return '<span class="badge xfer">transfer</span>'
 
 
-def search_bar_hint() -> str:
-    return ""
+def known_label(addr: str, known: dict) -> str:
+    name = known.get(addr, "")
+    return f' <span class="small">({h(name)})</span>' if name else ""
 
 
 # ---------------------------------------------------------------------------
 # Page renderers
 # ---------------------------------------------------------------------------
 
-def render_index(chain, known: dict) -> str:
+def render_index(chain: list, known: dict) -> str:
+    tip   = chain[-1]
     utxos = get_utxo_set(chain)
-    tip = chain[-1]
 
     rows = ""
     for block in reversed(chain):
-        miner_out = block.transactions[0].outputs[0] if block.transactions else None
-        miner_addr = miner_out.recipient if miner_out else "?"
-        label = next((name for name, addr in known.items() if addr == miner_addr), "")
-        label_html = f' <span class="known">({h(label)})</span>' if label else ""
-        rows += f"""
-        <tr>
+        miner_addr = block.transactions[0].outputs[0].recipient if block.transactions else "?"
+        rows += f"""<tr>
           <td><a href="/block/{block.index}">{block.index}</a></td>
-          <td>{fmt_hash(block.hash)}</td>
-          <td>{h(fmt_time(block.timestamp))}</td>
+          <td>{abbrev(block.hash)}</td>
+          <td>{abbrev(block.previous_hash)}</td>
+          <td class="dim">{h(fmt_time(block.timestamp))}</td>
           <td>{len(block.transactions)}</td>
-          <td><a href="/address/{h(miner_addr)}" class="mono">{h(miner_addr[:20])}…</a>{label_html}</td>
+          <td>
+            <a href="/address/{h(miner_addr)}" class="mono">{h(miner_addr[:20])}…</a>
+            {known_label(miner_addr, known)}
+          </td>
         </tr>"""
 
-    body = f"""
+    known_rows = "".join(
+        f'<tr><td>{h(n)}</td>'
+        f'<td><a href="/address/{h(a)}" class="mono">{h(a)}</a></td></tr>'
+        for n, a in known.items()
+    ) if known else "<tr><td colspan='2' class='dim'>—</td></tr>"
+
+    return f"""
     <h1>Latest Blocks</h1>
-    <p class="tip">Chain height: {tip.index} &nbsp;|&nbsp; Total blocks: {len(chain)} &nbsp;|&nbsp; UTXOs: {len(utxos)}</p>
+    <p class="stat">
+      Tip <b>{tip.index}</b> &nbsp;·&nbsp;
+      <b>{len(chain)}</b> blocks &nbsp;·&nbsp;
+      <b>{len(utxos)}</b> UTXOs
+    </p>
     <table>
-      <thead><tr><th>Height</th><th>Hash</th><th>Time</th><th>Txs</th><th>Miner</th></tr></thead>
+      <thead><tr>
+        <th>Height</th><th>Hash</th><th>Prev Hash</th>
+        <th>Time (UTC)</th><th>Txs</th><th>Miner</th>
+      </tr></thead>
       <tbody>{rows}</tbody>
     </table>
-    <h2>Demo Addresses</h2>
+
+    <h2>Known Addresses</h2>
     <table>
-      <thead><tr><th>Name</th><th>Address</th></tr></thead>
-      <tbody>"""
-    for name, addr in known.items():
-        body += f'<tr><td>{h(name)}</td><td><a href="/address/{h(addr)}" class="mono">{h(addr)}</a></td></tr>'
-    body += "</tbody></table>"
-    return body
+      <thead><tr><th>Label</th><th>Address</th></tr></thead>
+      <tbody>{known_rows}</tbody>
+    </table>"""
 
 
-def render_block(block, chain, indexer, known: dict) -> str:
-    idx = chain.index(block)
-    prev_link = f'<a href="/block/{idx - 1}">{h(block.previous_hash[:20])}…</a>' if idx > 0 else h(block.previous_hash[:20]) + "…"
+def render_block(block: Block, chain: list, tx_index: dict, known: dict) -> str:
+    prev_link = (
+        f'<a href="/block/{block.index - 1}" class="mono">{h(block.previous_hash[:22])}…</a>'
+        if block.index > 0 else
+        f'<span class="mono dim">{h(block.previous_hash[:22])}…</span>'
+    )
 
     rows = ""
     for tx in block.transactions:
-        in_total = "—" if tx.inputs[0].tx_id == COINBASE_TX_ID else "?"
+        fee = compute_fee(tx, tx_index)
         out_total = sum(o.amount for o in tx.outputs)
-        rows += f"""
-        <tr>
-          <td><a href="/tx/{h(tx.tx_id)}" class="mono">{h(tx.tx_id[:20])}…</a></td>
-          <td>{tx_type_badge(tx)}</td>
+        rows += f"""<tr>
+          <td><a href="/tx/{h(tx.tx_id)}" class="mono">{h(tx.tx_id[:22])}…</a></td>
+          <td>{badge(tx)}</td>
           <td>{len(tx.inputs)}</td>
           <td>{len(tx.outputs)}</td>
           <td>{out_total}</td>
+          <td>{fee or "—"}</td>
         </tr>"""
 
-    body = f"""
+    return f"""
     <h1>Block #{block.index}</h1>
     <div class="card">
       <dl>
-        <dt>Height</dt><dd>{block.index}</dd>
-        <dt>Hash</dt><dd class="mono">{h(block.hash)}</dd>
+        <dt>Height</dt>       <dd>{block.index}</dd>
+        <dt>Hash</dt>         <dd class="mono">{h(block.hash)}</dd>
         <dt>Previous Hash</dt><dd class="mono">{prev_link}</dd>
-        <dt>Merkle Root</dt><dd class="mono">{h(block.merkle_root[:32])}…</dd>
-        <dt>Timestamp</dt><dd>{h(fmt_time(block.timestamp))}</dd>
-        <dt>Nonce</dt><dd>{block.nonce:,}</dd>
-        <dt>Transactions</dt><dd>{len(block.transactions)}</dd>
+        <dt>Merkle Root</dt>  <dd class="mono">{h(block.merkle_root[:32])}…</dd>
+        <dt>Timestamp</dt>    <dd>{h(fmt_time(block.timestamp))}</dd>
+        <dt>Nonce</dt>        <dd>{block.nonce:,}</dd>
+        <dt>Transactions</dt> <dd>{len(block.transactions)}</dd>
       </dl>
     </div>
     <h2>Transactions</h2>
     <table>
-      <thead><tr><th>TX ID</th><th>Type</th><th>Inputs</th><th>Outputs</th><th>Total Out</th></tr></thead>
+      <thead><tr>
+        <th>TX ID</th><th>Type</th><th>Inputs</th><th>Outputs</th><th>Total Out</th><th>Fee</th>
+      </tr></thead>
       <tbody>{rows}</tbody>
     </table>"""
-    return body
 
 
-def render_tx(tx, block, indexer, known: dict) -> str:
-    is_coinbase = tx.inputs[0].tx_id == COINBASE_TX_ID
+def render_tx(tx: Transaction, block: Block, tx_index: dict, known: dict) -> str:
+    is_cb     = tx.inputs[0].tx_id == COINBASE_TX_ID
+    fee       = compute_fee(tx, tx_index)
+    out_total = sum(o.amount for o in tx.outputs)
 
     inp_rows = ""
     for inp in tx.inputs:
         if inp.tx_id == COINBASE_TX_ID:
-            inp_rows += f"<tr><td colspan='3'><em>coinbase (block reward)</em></td></tr>"
+            inp_rows += "<tr><td colspan='4'><em class='dim'>coinbase — block reward</em></td></tr>"
         else:
+            prev      = tx_index.get(inp.tx_id)
+            amount    = prev.outputs[inp.output_index].amount if prev else "?"
+            from_addr = prev.outputs[inp.output_index].recipient if prev else "?"
             inp_rows += f"""<tr>
-              <td><a href="/tx/{h(inp.tx_id)}" class="mono">{h(inp.tx_id[:20])}…</a></td>
+              <td><a href="/tx/{h(inp.tx_id)}" class="mono">{h(inp.tx_id[:18])}…</a></td>
               <td>{inp.output_index}</td>
-              <td class="mono">{h(inp.public_key[:20]) if inp.public_key else '—'}…</td>
+              <td>
+                <a href="/address/{h(from_addr)}" class="mono">{h(str(from_addr)[:20])}…</a>
+                {known_label(str(from_addr), known)}
+              </td>
+              <td>{amount}</td>
             </tr>"""
 
     out_rows = ""
     for i, out in enumerate(tx.outputs):
-        label = next((name for name, addr in known.items() if addr == out.recipient), "")
-        label_html = f' <span class="known">({h(label)})</span>' if label else ""
         out_rows += f"""<tr>
           <td>{i}</td>
-          <td><a href="/address/{h(out.recipient)}" class="mono">{h(out.recipient)}</a>{label_html}</td>
+          <td>
+            <a href="/address/{h(out.recipient)}" class="mono">{h(out.recipient)}</a>
+            {known_label(out.recipient, known)}
+          </td>
           <td>{out.amount}</td>
         </tr>"""
 
-    # Inscription section
-    inscription_html = ""
+    ins_html = ""
     if tx.data:
-        raw_bytes = bytes.fromhex(tx.data)
+        raw = bytes.fromhex(tx.data)
         try:
-            decoded = raw_bytes.decode("utf-8")
-            text_section = f"<p><strong>As text:</strong></p><pre>{h(decoded)}</pre>"
+            text_block = f"<p><b>Text:</b></p><pre>{h(raw.decode('utf-8'))}</pre>"
         except UnicodeDecodeError:
-            text_section = "<p><em>Binary data (not UTF-8)</em></p>"
-        inscription_html = f"""
-        <h2>Inscription Data ({len(raw_bytes)} bytes)</h2>
-        <div class="inscription-box">
-          {text_section}
-          <p style="margin-top:8px"><strong>Hex:</strong></p>
+            text_block = "<p class='dim'>Binary data — not valid UTF-8</p>"
+        ins_html = f"""
+        <h2>Inscription ({len(raw)} bytes)</h2>
+        <div class="ibox">
+          {text_block}
+          <p style="margin-top:8px"><b>Hex:</b></p>
           <pre>{h(tx.data)}</pre>
         </div>"""
 
-    block_link = f'<a href="/block/{block.index}">Block #{block.index}</a>'
-    body = f"""
+    return f"""
     <h1>Transaction</h1>
     <div class="card">
       <dl>
-        <dt>TX ID</dt><dd class="mono">{h(tx.tx_id)}</dd>
-        <dt>Block</dt><dd>{block_link}</dd>
-        <dt>Type</dt><dd>{tx_type_badge(tx)}</dd>
-        <dt>Inputs</dt><dd>{len(tx.inputs)}</dd>
-        <dt>Outputs</dt><dd>{len(tx.outputs)}</dd>
+        <dt>TX ID</dt>    <dd class="mono">{h(tx.tx_id)}</dd>
+        <dt>Block</dt>    <dd><a href="/block/{block.index}">#{block.index}</a></dd>
+        <dt>Type</dt>     <dd>{badge(tx)}</dd>
+        <dt>Total Out</dt><dd>{out_total}</dd>
+        <dt>Fee</dt>      <dd>{fee if not is_cb else "—"}</dd>
       </dl>
     </div>
     <h2>Inputs</h2>
     <table>
-      <thead><tr><th>Spending TX</th><th>Output Index</th><th>Public Key</th></tr></thead>
+      <thead><tr><th>Prev TX</th><th>Output #</th><th>From</th><th>Amount</th></tr></thead>
       <tbody>{inp_rows}</tbody>
     </table>
     <h2>Outputs</h2>
@@ -338,169 +443,155 @@ def render_tx(tx, block, indexer, known: dict) -> str:
       <thead><tr><th>#</th><th>Recipient</th><th>Amount</th></tr></thead>
       <tbody>{out_rows}</tbody>
     </table>
-    {inscription_html}"""
-    return body
+    {ins_html}"""
 
 
-def render_address(addr: str, chain, known: dict) -> str:
-    utxos = get_utxo_set(chain)
-    owned = {k: v for k, v in utxos.items() if v.recipient == addr}
+def render_address(addr: str, chain: list, tx_index: dict, known: dict) -> str:
+    utxos   = get_utxo_set(chain)
+    owned   = {k: v for k, v in utxos.items() if v.recipient == addr}
     balance = sum(v.amount for v in owned.values())
 
-    label = next((name for name, a in known.items() if a == addr), "")
-    label_html = f' <span class="known">({h(label)})</span>' if label else ""
+    utxo_rows = "".join(
+        f'<tr>'
+        f'<td><a href="/tx/{h(tid)}" class="mono">{h(tid[:20])}…</a></td>'
+        f'<td>{oi}</td>'
+        f'<td>{utxo.amount}</td>'
+        f'</tr>'
+        for (tid, oi), utxo in owned.items()
+    ) or "<tr><td colspan='3' class='dim'>No unspent outputs</td></tr>"
 
-    utxo_rows = ""
-    for (tx_id, out_idx), utxo in owned.items():
-        utxo_rows += f"""<tr>
-          <td><a href="/tx/{h(tx_id)}" class="mono">{h(tx_id[:20])}…</a></td>
-          <td>{out_idx}</td>
-          <td>{utxo.amount}</td>
-        </tr>"""
-    if not utxo_rows:
-        utxo_rows = "<tr><td colspan='3'><em>No unspent outputs</em></td></tr>"
-
-    # Find all txs involving this address
     tx_rows = ""
-    seen = set()
-    for block in chain:
-        for tx in block.transactions:
-            involved = any(o.recipient == addr for o in tx.outputs)
-            if not involved and tx.inputs[0].tx_id != COINBASE_TX_ID:
-                # Check if any input references a UTXO sent to this address (spending)
-                for inp in tx.inputs:
-                    prev = utxos.get((inp.tx_id, inp.output_index))
-                    # Note: already spent, won't be in current utxo set; scan chain instead
-            if involved and tx.tx_id not in seen:
-                seen.add(tx.tx_id)
-                out_total = sum(o.amount for o in tx.outputs if o.recipient == addr)
-                tx_rows += f"""<tr>
-                  <td><a href="/block/{block.index}">#{block.index}</a></td>
-                  <td><a href="/tx/{h(tx.tx_id)}" class="mono">{h(tx.tx_id[:20])}…</a></td>
-                  <td>{tx_type_badge(tx)}</td>
-                  <td>+{out_total}</td>
-                </tr>"""
+    for block, tx, received, sent in txs_for_address(addr, chain, tx_index):
+        parts = []
+        if received: parts.append(f'<span class="in">+{received}</span>')
+        if sent:     parts.append(f'<span class="out">−{sent}</span>')
+        tx_rows += f"""<tr>
+          <td><a href="/block/{block.index}">#{block.index}</a></td>
+          <td><a href="/tx/{h(tx.tx_id)}" class="mono">{h(tx.tx_id[:20])}…</a></td>
+          <td>{badge(tx)}</td>
+          <td>{"  ".join(parts)}</td>
+        </tr>"""
     if not tx_rows:
-        tx_rows = "<tr><td colspan='4'><em>No transactions found</em></td></tr>"
+        tx_rows = "<tr><td colspan='4' class='dim'>No transactions</td></tr>"
 
-    body = f"""
-    <h1>Address{label_html}</h1>
+    label = known.get(addr, "")
+    heading = f"Address — {h(label)}" if label else "Address"
+
+    return f"""
+    <h1>{heading}</h1>
     <div class="card">
-      <p class="mono" style="word-break:break-all;margin-bottom:12px">{h(addr)}</p>
-      <p class="balance-big">{balance} <span style="font-size:1rem;color:#6c757d">coins</span></p>
+      <p class="mono" style="margin-bottom:10px">{h(addr)}</p>
+      <p class="bal">{balance} <span style="font-size:1rem;color:#6b7280">coins</span></p>
     </div>
     <h2>Unspent Outputs ({len(owned)})</h2>
     <table>
       <thead><tr><th>TX ID</th><th>Index</th><th>Amount</th></tr></thead>
       <tbody>{utxo_rows}</tbody>
     </table>
-    <h2>Received Transactions</h2>
+    <h2>Transaction History</h2>
     <table>
-      <thead><tr><th>Block</th><th>TX ID</th><th>Type</th><th>Amount In</th></tr></thead>
+      <thead><tr><th>Block</th><th>TX ID</th><th>Type</th><th>Amount</th></tr></thead>
       <tbody>{tx_rows}</tbody>
     </table>"""
-    return body
 
 
-def render_not_found(query: str) -> str:
-    return f'<div class="error"><strong>Not found:</strong> {h(query)}</div>'
+def render_error(msg: str, detail: str = "") -> str:
+    detail_html = f"<p style='margin-top:8px;font-size:12px;font-family:monospace'>{h(detail)}</p>" if detail else ""
+    return f'<div class="err"><b>Error:</b> {h(msg)}{detail_html}</div>'
+
+
+def render_not_found(q: str) -> str:
+    return f'<div class="err"><b>Not found:</b> {h(q)}</div>'
 
 
 # ---------------------------------------------------------------------------
-# Request handler
+# HTTP handler
 # ---------------------------------------------------------------------------
 
-# Global state — set once before server starts
 STATE: dict = {}
 
 
-def find_tx(tx_id: str, chain):
-    for block in chain:
-        for tx in block.transactions:
-            if tx.tx_id == tx_id:
-                return tx, block
-    return None, None
-
-
-class ExplorerHandler(BaseHTTPRequestHandler):
+class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        pass  # suppress default access log noise
+        pass
 
     def send_html(self, content: str, status: int = 200):
-        encoded = content.encode("utf-8")
+        body = content.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(encoded)
+        self.wfile.write(body)
 
-    def redirect(self, location: str):
+    def redirect(self, loc: str):
         self.send_response(302)
-        self.send_header("Location", location)
+        self.send_header("Location", loc)
         self.end_headers()
+
+    def get_chain(self):
+        """Return current chain — fetched live if in node mode, static in demo mode."""
+        node = STATE.get("node")
+        if node:
+            host, port = node
+            return fetch_chain_from_node(host, port)
+        return STATE["chain"]
 
     def do_GET(self):
-        chain = STATE["chain"]
-        indexer = STATE["indexer"]
-        known = STATE["known"]
+        known      = STATE["known"]
+        mode_label = STATE["mode_label"]
 
         parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
-        parts = [p for p in path.split("/") if p]
+        path   = parsed.path.rstrip("/") or "/"
+        parts  = [p for p in path.split("/") if p]
 
-        # GET /
+        # Fetch fresh chain on every request
+        try:
+            chain = self.get_chain()
+        except Exception as exc:
+            body = render_error("Could not reach node", str(exc))
+            self.send_html(page("Error", body, mode_label), 503)
+            return
+
+        tx_index = build_tx_index(chain)
+
+        # Routes
         if path == "/":
-            body = render_index(chain, known)
-            self.send_html(page("Home", body))
+            self.send_html(page("Home", render_index(chain, known), mode_label))
 
-        # GET /block/<height>
         elif len(parts) == 2 and parts[0] == "block":
             try:
-                height = int(parts[1])
-                block = chain[height]
-                body = render_block(block, chain, indexer, known)
-                self.send_html(page(f"Block #{height}", body))
+                block = chain[int(parts[1])]
+                self.send_html(page(f"Block #{block.index}",
+                                    render_block(block, chain, tx_index, known), mode_label))
             except (ValueError, IndexError):
-                body = render_not_found(parts[1])
-                self.send_html(page("Not Found", body), status=404)
+                self.send_html(page("Not Found", render_not_found(parts[1]), mode_label), 404)
 
-        # GET /tx/<tx_id>
         elif len(parts) == 2 and parts[0] == "tx":
-            tx_id = parts[1]
-            tx, block = find_tx(tx_id, chain)
+            tx, block = find_tx(parts[1], chain)
             if tx:
-                body = render_tx(tx, block, indexer, known)
-                self.send_html(page(f"TX {tx_id[:12]}…", body))
+                self.send_html(page(f"TX {parts[1][:12]}…",
+                                    render_tx(tx, block, tx_index, known), mode_label))
             else:
-                body = render_not_found(tx_id)
-                self.send_html(page("Not Found", body), status=404)
+                self.send_html(page("Not Found", render_not_found(parts[1]), mode_label), 404)
 
-        # GET /address/<addr>
         elif len(parts) == 2 and parts[0] == "address":
-            addr = parts[1]
-            body = render_address(addr, chain, known)
-            self.send_html(page(f"Address {addr[:12]}…", body))
+            self.send_html(page(f"Address {parts[1][:12]}…",
+                                render_address(parts[1], chain, tx_index, known), mode_label))
 
-        # GET /search?q=...
         elif path == "/search":
-            qs = parse_qs(parsed.query)
-            q = qs.get("q", [""])[0].strip()
+            q = parse_qs(parsed.query).get("q", [""])[0].strip()
             if not q:
                 self.redirect("/")
             elif q.isdigit():
                 self.redirect(f"/block/{q}")
             elif len(q) == 64 and all(c in "0123456789abcdefABCDEF" for c in q):
                 tx, _ = find_tx(q, chain)
-                if tx:
-                    self.redirect(f"/tx/{q}")
-                else:
-                    self.redirect(f"/address/{q}")
+                self.redirect(f"/tx/{q}" if tx else f"/address/{q}")
             else:
                 self.redirect(f"/address/{q}")
 
         else:
-            body = render_not_found(path)
-            self.send_html(page("Not Found", body), status=404)
+            self.send_html(page("Not Found", render_not_found(path), mode_label), 404)
 
 
 # ---------------------------------------------------------------------------
@@ -508,30 +599,45 @@ class ExplorerHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Gigachain Block Explorer")
-    parser.add_argument("--port", type=int, default=8080, help="HTTP port (default: 8080)")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="Gigachain Block Explorer")
+    ap.add_argument("--port", type=int, default=8080, help="Explorer HTTP port (default: 8080)")
+    ap.add_argument("--node", metavar="HOST:PORT",
+                    help="Connect to a running Gigachain node (e.g. 127.0.0.1:9000)")
+    args = ap.parse_args()
 
-    print("Building demo chain (mining a few blocks, please wait)…")
-    t0 = time.time()
-    chain, indexer, known = build_demo_chain()
-    elapsed = time.time() - t0
-    print(f"Demo chain ready: {len(chain)} blocks in {elapsed:.1f}s")
-    print(f"  miner : {known['miner']}")
-    print(f"  alice : {known['alice']}")
-    print(f"  bob   : {known['bob']}")
+    if args.node:
+        # Live node mode
+        host, port_str = args.node.rsplit(":", 1)
+        node_port = int(port_str)
+        print(f"Live mode — connecting to node at {host}:{node_port}")
+        try:
+            chain = fetch_chain_from_node(host, node_port)
+            print(f"Connected. Chain length: {len(chain)} blocks.")
+        except Exception as e:
+            print(f"Warning: initial fetch failed ({e}). Will retry on each request.")
+        STATE["node"]       = (host, node_port)
+        STATE["chain"]      = None
+        STATE["known"]      = {}
+        STATE["mode_label"] = f"live · {host}:{node_port}"
+    else:
+        # Demo mode
+        print("Demo mode — building local chain (mining a few blocks)…")
+        t0 = time.time()
+        chain, known = build_demo_chain()
+        print(f"Ready: {len(chain)} blocks in {time.time() - t0:.1f}s")
+        for name, addr in known.items():
+            print(f"  {name:6s}  {addr}")
+        STATE["node"]       = None
+        STATE["chain"]      = chain
+        STATE["known"]      = known
+        STATE["mode_label"] = "demo"
 
-    STATE["chain"] = chain
-    STATE["indexer"] = indexer
-    STATE["known"] = known
-
-    server = HTTPServer(("127.0.0.1", args.port), ExplorerHandler)
-    print(f"\nExplorer running at http://127.0.0.1:{args.port}/")
-    print("Press Ctrl+C to stop.\n")
+    server = HTTPServer(("127.0.0.1", args.port), Handler)
+    print(f"\nExplorer →  http://127.0.0.1:{args.port}/\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopped.")
+        print("Stopped.")
 
 
 if __name__ == "__main__":
